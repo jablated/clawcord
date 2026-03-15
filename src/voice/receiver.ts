@@ -1,33 +1,21 @@
-import { EventEmitter } from 'events';
 import { VoiceConnection, VoiceReceiver as DjsVoiceReceiver, EndBehaviorType } from '@discordjs/voice';
 import { VoiceActivityDetector } from './vad.js';
+import type { Transcriber } from './transcribe.js';
+import type { Speaker } from './speaker.js';
+import type { GatewayClient } from '../gateway/client.js';
 
-export interface UtteranceEvent {
-  userId: string;
-  audioBuffer: Buffer[];
-}
-
-export interface ReceiverEvents {
-  utterance: [event: UtteranceEvent];
-}
-
-export class VoiceReceiver extends EventEmitter {
-  private connection: VoiceConnection;
+export class VoiceReceiver {
   private vadMap = new Map<string, VoiceActivityDetector>();
   private active = false;
 
-  constructor(connection: VoiceConnection) {
-    super();
-    this.connection = connection;
-  }
-
-  emit<K extends keyof ReceiverEvents>(event: K, ...args: ReceiverEvents[K]): boolean {
-    return super.emit(event, ...args);
-  }
-
-  on<K extends keyof ReceiverEvents>(event: K, listener: (...args: ReceiverEvents[K]) => void): this {
-    return super.on(event, listener as (...args: unknown[]) => void);
-  }
+  constructor(
+    private connection: VoiceConnection,
+    private transcriber: Transcriber,
+    private gatewayClient: GatewayClient,
+    private speaker: Speaker,
+    private guildId: string,
+    private channelId: string,
+  ) {}
 
   start(): void {
     if (this.active) return;
@@ -36,13 +24,14 @@ export class VoiceReceiver extends EventEmitter {
     const receiver: DjsVoiceReceiver = this.connection.receiver;
 
     receiver.speaking.on('start', (userId: string) => {
-      console.log(`[receiver] User ${userId} started speaking`);
+      console.log(`[voice] User ${userId} started speaking`);
 
       if (!this.vadMap.has(userId)) {
         const vad = new VoiceActivityDetector();
         vad.on('speech_end', (frames) => {
-          console.log(`[receiver] Utterance complete for user ${userId}, ${frames.length} frames`);
-          this.emit('utterance', { userId, audioBuffer: frames });
+          this.handleUtterance(userId, frames).catch((err: unknown) => {
+            console.error(`[voice] Pipeline error for user ${userId}:`, err);
+          });
         });
         this.vadMap.set(userId, vad);
       }
@@ -58,13 +47,13 @@ export class VoiceReceiver extends EventEmitter {
       });
 
       audioStream.on('end', () => {
-        console.log(`[receiver] Audio stream ended for user ${userId}`);
+        console.log(`[voice] Audio stream ended for user ${userId}`);
         vad.reset();
       });
     });
 
     receiver.speaking.on('end', (userId: string) => {
-      console.log(`[receiver] User ${userId} stopped speaking`);
+      console.log(`[voice] User ${userId} stopped speaking`);
     });
   }
 
@@ -76,5 +65,27 @@ export class VoiceReceiver extends EventEmitter {
       vad.reset();
     }
     this.vadMap.clear();
+  }
+
+  private async handleUtterance(userId: string, frames: Buffer[]): Promise<void> {
+    console.log(`[voice] Utterance from ${userId}: ${frames.length} Opus frames`);
+
+    const text = await this.transcriber.transcribe(frames);
+    if (!text) {
+      console.log(`[voice] No speech detected for ${userId}, skipping`);
+      return;
+    }
+
+    console.log(`[voice] Transcribed (${userId}): "${text}"`);
+
+    const sessionKey = `clawcord-${this.guildId}-${this.channelId}-${userId}`;
+    const response = await this.gatewayClient.sendMessage(sessionKey, text);
+    if (!response) {
+      console.log(`[voice] Empty response from gateway for ${userId}`);
+      return;
+    }
+
+    console.log(`[voice] Gateway response: "${response}"`);
+    await this.speaker.speak(response);
   }
 }

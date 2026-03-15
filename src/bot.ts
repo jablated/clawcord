@@ -9,6 +9,10 @@ import {
 } from 'discord.js';
 import { joinVoiceChannel, getVoiceConnection, VoiceConnectionStatus } from '@discordjs/voice';
 import { config } from './config.js';
+import { Transcriber } from './voice/transcribe.js';
+import { Speaker } from './voice/speaker.js';
+import { VoiceReceiver } from './voice/receiver.js';
+import { GatewayClient } from './gateway/client.js';
 
 const client = new Client({
   intents: [
@@ -26,6 +30,14 @@ const commands = [
     .setName('leave')
     .setDescription('Leave the current voice channel'),
 ].map((cmd) => cmd.toJSON());
+
+// Per-guild cleanup handles: receiver + gatewayClient
+interface GuildSession {
+  receiver: VoiceReceiver;
+  gatewayClient: GatewayClient;
+}
+
+const sessions = new Map<string, GuildSession>();
 
 async function registerCommands(): Promise<void> {
   const rest = new REST({ version: '10' }).setToken(config.discord.botToken);
@@ -50,15 +62,36 @@ async function handleJoin(interaction: ChatInputCommandInteraction): Promise<voi
     return;
   }
 
-  joinVoiceChannel({
-    channelId: voiceChannel.id,
-    guildId: interaction.guildId,
+  const guildId = interaction.guildId;
+  const channelId = voiceChannel.id;
+
+  // Clean up any existing session in this guild
+  await cleanupSession(guildId);
+
+  const connection = joinVoiceChannel({
+    channelId,
+    guildId,
     adapterCreator: voiceChannel.guild.voiceAdapterCreator,
     selfDeaf: false,
     selfMute: false,
   });
 
-  console.log(`[bot] Joined voice channel: ${voiceChannel.name} in guild ${interaction.guildId}`);
+  const transcriber = new Transcriber(config);
+  const gatewayClient = new GatewayClient(config.gateway.url, config.gateway.token);
+  const speaker = new Speaker(connection, config);
+  const receiver = new VoiceReceiver(connection, transcriber, gatewayClient, speaker, guildId, channelId);
+
+  try {
+    await gatewayClient.connect();
+  } catch (err) {
+    console.error('[bot] Gateway connection failed:', err);
+    // Continue anyway — gateway will retry
+  }
+
+  receiver.start();
+  sessions.set(guildId, { receiver, gatewayClient });
+
+  console.log(`[bot] Joined voice channel: ${voiceChannel.name} in guild ${guildId}`);
   await interaction.reply({ content: `Joined **${voiceChannel.name}**. Listening...` });
 }
 
@@ -74,13 +107,25 @@ async function handleLeave(interaction: ChatInputCommandInteraction): Promise<vo
     return;
   }
 
+  await cleanupSession(interaction.guildId);
   connection.destroy();
+
   console.log(`[bot] Left voice channel in guild ${interaction.guildId}`);
   await interaction.reply({ content: 'Left the voice channel.' });
 }
 
+async function cleanupSession(guildId: string): Promise<void> {
+  const session = sessions.get(guildId);
+  if (!session) return;
+
+  session.receiver.stop();
+  session.gatewayClient.disconnect();
+  sessions.delete(guildId);
+}
+
 client.once('ready', async (c) => {
   console.log(`[bot] Logged in as ${c.user.tag}`);
+  console.log(`[bot] STT: ${config.stt.provider} / TTS: ${config.tts.provider}`);
   await registerCommands();
 });
 
@@ -103,6 +148,9 @@ client.on('interactionCreate', async (interaction) => {
 
 function shutdown(): void {
   console.log('[bot] Shutting down...');
+  for (const [guildId] of sessions) {
+    cleanupSession(guildId).catch(() => undefined);
+  }
   client.destroy();
   process.exit(0);
 }

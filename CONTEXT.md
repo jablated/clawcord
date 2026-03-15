@@ -9,46 +9,49 @@
 ## Last Session: 2026-03-15
 
 ### Completed
-- Project created as `clawcord` — Discord voice bridge for OpenClaw
-- Full TypeScript project scaffold (strict mode, ESM, Vitest, ESLint)
-- **Phase 1 — Bot skeleton:**
-  - `src/config.ts` — env var loading and validation
-  - `src/bot.ts` — Discord client with `/join` and `/leave` slash commands
-  - Bot joins/leaves voice channels on command, graceful shutdown
-- **Phase 2 — Audio pipeline (inbound):**
-  - `src/voice/vad.ts` — Voice Activity Detector using Discord's silence frames (0xF8, 0xFF, 0xFE) + 700ms fallback timer
-  - `src/voice/receiver.ts` — captures per-user Opus streams, uses VAD to emit `utterance` events
-  - `src/voice/transcribe.ts` — Whisper STT stub (Opus→WAV conversion is stubbed, API call wired)
-  - `src/gateway/client.ts` — OpenClaw Gateway WebSocket client with reconnect logic
-- Unit tests: `tests/voice/vad.test.ts`, `tests/gateway/client.test.ts`
-- TypeScript compiles clean (`tsc --noEmit` passes)
-- Pushed to https://github.com/jablated/clawcord
+- **Phase 3 — Full voice loop, local Whisper + Piper TTS, multi-provider STT/TTS:**
+  - `src/config.ts` — added STT/TTS provider env vars with sensible defaults
+  - `src/voice/transcribe.ts` — replaced stub with real Opus→WAV pipeline using `prism-media` OpusDecoder + 3:1 decimation downsample to 16kHz mono; multi-provider STT routing (`local-whisper`, `openai-whisper`, `openai-compatible`)
+  - `src/voice/speaker.ts` — new file; `Speaker` class with Piper TTS (piper binary → ffmpeg resampling → Discord AudioPlayer) and OpenAI/compatible TTS (MP3 → StreamType.Arbitrary)
+  - `src/voice/receiver.ts` — removed EventEmitter abstraction; now directly wires the full loop on `speech_end`: transcribe → gateway sendMessage → speak; logs each step with `[voice]` prefix
+  - `src/bot.ts` — `/join` creates all instances (Transcriber, GatewayClient, Speaker, VoiceReceiver), connects gateway, stores per-guild session; `/leave` cleans up all instances
+  - `scripts/setup-piper.sh` — installs piper-tts and downloads default voice model
+  - `.env.example` — comprehensive comments for all providers
+  - `tests/voice/transcribe.test.ts` — 7 unit tests for Transcriber provider routing and error handling
+- All 27 tests pass (`vitest run`), `tsc --noEmit` clean
+
+### Architecture notes
+- Audio pipeline: Discord Opus → prism-media OpusDecoder (48kHz stereo S16LE) → 3:1 decimation → 16kHz mono → WAV → Whisper
+- Piper pipeline: piper `--output_raw` (22050Hz mono) → ffmpeg (48kHz stereo S16LE) → `StreamType.Raw` → Discord
+- OpenAI TTS pipeline: MP3 buffer → `Readable.from()` → `StreamType.Arbitrary` (ffmpeg via prism-media) → Discord
+- Session key format: `clawcord-{guildId}-{channelId}-{userId}`
 
 ### Blockers
-- **Opus → WAV conversion is stubbed** — `transcribe.ts` has a TODO where `prism-media` needs to decode Opus frames to PCM and write a proper 16kHz mono WAV buffer before Whisper can process it. This is the critical missing piece for Phase 3.
-- **Bot not yet deployed/tested live** — needs a real Discord bot token + test server. See `.env.example`.
-- **npm PATH issue on this host** — running `npm test` directly fails with Node path errors; use `source ~/.nvm/nvm.sh && nvm use default && npx vitest run` instead.
+- **Not yet live-tested** — needs a real Discord bot token + test server with voice channel
+- **ffmpeg required** for Piper TTS resampling — should be pre-installed on any Linux deployment host
+- **Piper model not downloaded** — run `scripts/setup-piper.sh` on the deploy host
+- `openai-whisper` CLI must be installed (`pip install openai-whisper`) for `local-whisper` provider
 
-### Proposed Next Steps (Phase 3)
+### Proposed Next Steps (Phase 4)
 
-1. **Fix Opus → WAV pipeline** (`src/voice/transcribe.ts`)
-   - Use `prism-media` to transcode Opus frames to raw PCM
-   - Write a WAV header (16kHz, mono, 16-bit) and pass to Whisper
-   - Test with a real `.ogg` file (we have one at `~/.openclaw/media/inbound/`)
+1. **Live test** in a real Discord server
+   - Set up `.env` with bot token + client ID
+   - Register slash commands (`/join`, `/leave`)
+   - Verify full pipeline: speak → transcribe → gateway → TTS → playback
 
-2. **Wire up the full loop** (`src/voice/receiver.ts` + `src/gateway/client.ts`)
-   - On `utterance` event: transcribe → send to OpenClaw Gateway → get response
-   - Feed response text to TTS → stream audio back into voice channel
+2. **Docker Compose** deployment
+   - Service: clawcord (Node 20+)
+   - Mount piper model directory as volume
+   - Environment file injection
 
-3. **Create `src/voice/speaker.ts`**
-   - OpenAI TTS (or local Kokoro) → audio buffer
-   - Stream into Discord voice channel via `AudioPlayer` + `createAudioResource`
+3. **Robustness improvements**
+   - Handle `speaker.speak()` errors gracefully (don't crash the receiver loop)
+   - Add rate limiting / debounce per-user to avoid multiple simultaneous transcriptions
+   - Log total latency (capture → transcribe → gateway → speak) per utterance
 
-4. **Live test in a Discord server**
-   - Need: bot token, client ID, test server with voice channel
-   - Register slash commands, join a channel, speak, verify transcription in logs
-
-5. **Docker compose** for deployment alongside OpenClaw on a LAN host
+4. **Piper sample rate detection**
+   - Currently hardcoded to 22050Hz in the ffmpeg resampler
+   - Parse the `.onnx.json` model config to read `audio.sample_rate` dynamically
 
 ---
 
