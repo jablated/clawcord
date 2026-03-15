@@ -79,3 +79,14 @@ See `.env.example`. Required:
 - Silence detection: Discord sends 5 frames of silence (0xF8, 0xFF, 0xFE) when user stops — use as VAD trigger
 - Audio pipeline: Opus (Discord) → PCM (prism-media) → 16kHz mono WAV (Whisper)
 - OpenClaw Gateway expects `agent.message` type messages with a session key
+
+## Session Handoff
+
+At the **start** of every session: read `CONTEXT.md` for current status, blockers, and next steps.
+
+At the **end** of every session: update `CONTEXT.md` with:
+- What was completed this session
+- Any new blockers discovered
+- Updated proposed next steps
+
+Keep `CONTEXT.md` as the living handoff doc — future agents (and Elbereth) rely on it to pick up without re-reading the whole codebase.
