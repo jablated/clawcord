@@ -90,3 +90,20 @@ At the **end** of every session: update `CONTEXT.md` with:
 - Updated proposed next steps
 
 Keep `CONTEXT.md` as the living handoff doc — future agents (and Elbereth) rely on it to pick up without re-reading the whole codebase.
+
+## 🔐 NEVER Commit Secrets — Pre-Commit Checklist
+
+**Before every single `git commit`, run this mental checklist:**
+
+1. `git diff --staged` — scan every line being committed
+2. Look for: tokens, API keys, passwords, URLs with credentials, anything that looks like `sk-...`, `ghp_...`, `Bot ...`, hex strings, base64 blobs
+3. If ANY secret is staged → STOP, unstage it, add to `.gitignore`, then re-commit
+
+**Files that must NEVER be committed:**
+- `.env`, `.env.*` (except `.env.example`)
+- `.envrc`
+- Any file containing `TOKEN`, `SECRET`, `PASSWORD`, `API_KEY` as a value (not a placeholder)
+
+**If you're unsure:** treat it as a secret and exclude it. A false positive is always safer than a leaked credential.
+
+This rule has zero exceptions. Not even for "temporary" commits or "just testing."
